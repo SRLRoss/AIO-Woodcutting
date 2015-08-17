@@ -1,0 +1,493 @@
+program AIOWoodcutting;
+{$include_once ogLib/lib/core/core.Simba}
+
+
+const
+
+  REVISION = 1.0;
+
+  {                   *Client Settings*
+            The size you want your client to be.
+  }
+  CLIENT_WIDTH = 800;
+  CLIENT_HEIGHT = 600;
+
+  {                    *Skills to Track*
+                          Choose one.
+   'woodcutting', 'firemaking', 'fletching', or 'overall'
+  }
+
+  SKILL_TO_TRACK = 'woodcutting';
+
+  {                     *Tree to Chop*
+                      Supported trees are:
+     'normal', 'evergreen', 'achey', 'oak', 'willow'
+       'maple','teak', 'arcticpine', and 'mahogany'
+  }
+
+  TREE_TO_CHOP = 'teak';
+
+  {                    *On Inventory Full*
+Either burn them via bonfire or fletch them, otherwise the script drops inventory.
+   CRAFT_SELECTION means which to select on the fletching production screen.
+       i.e. for normal logs: 0 = arrow shafts, 1 = shortbow, etc.
+  }
+
+  BURN_LOGS = false;
+  CRAFT_LOGS = false;
+  CRAFT_SELECTION = 0;
+
+  {                   *Micro Breaking*
+       Each break lasts between 10 and 30 seconds
+        TAKE_MICRO_BREAK_EVERY calls for minutes.
+                   Randomizes +/-5 minutes
+  }
+
+  TAKE_MICRO_BREAKS = true;
+  TAKE_MICRO_BREAK_EVERY = 10;
+
+  {                     *Misc Settings*
+    DROP_SPEED = the speed at which to drop inventory.
+                1 is fastest, 10 is slowest
+    CHECK_TIME = failsafe for chopping logs- no need to edit!
+  }
+
+  DROP_SPEED = 5;
+  CHECK_TIME = 30;
+
+
+
+var
+  treeToChop: TCardinalArray;
+  logType: TIntegerArray;
+  currentStatus, tree: string;
+  center:TPoint;
+  startXP, currentXP, logsChopped, breaksTaken: integer;
+  xpBox: TBox;
+  xpIcon: glTextureArray;
+  playerModelID: uint32;
+  microBreakCountdown, terminateTimer: tCountDown;
+
+procedure getUpdate();
+var
+  newFile: Integer;
+  newRev: Extended;
+begin
+  newRev := strToFloat(getPage('http://tomstewart.net/proxy.php?url=https://raw.githubusercontent.com/SRLRoss/AIO-Woodcutting/master/version.txt'));
+
+  if newRev > REVISION then
+  begin
+    writeln('Updating from revision ' + toStr(REVISION) + ' to revision ' + toStr(newRev));
+    newFile := rewriteFile(scriptPath + 'Ross'' AIO Woodcutting v' + toStr(newRev) + '.simba', false);
+    writeFileString(newFile, getPage('http://tomstewart.net/proxy.php?url=https://raw.githubusercontent.com/SRLRoss/AIO-Woodcutting/master/AIOWoodcutting.simba'));
+    closeFile(newFile);
+    writeln('Please open the new file.');
+    terminateScript();
+  end
+  else
+    writeln('Script is up-to-date.');
+end;
+
+function getPlayerModelID(): uint32;
+var
+  playerBox: TBox;
+  pModel: glModelArray;
+begin
+  playerBox:=intToBox(center.x-20, center.y-25, center.x+20, center.y+25);
+  pModel:=ogl.getModels(playerBox);
+  result:=pModel[high(pModel)].id;
+end;
+
+function getTime(time: uint32): string;
+var
+  h, m, s: integer;
+begin
+  s := time mod 3600000 mod 60000 div 1000;
+  m := time mod 3600000 div 60000;
+  h := time div 3600000;
+  result:= (toStr(h) + ' h ' + toStr(m) + ' m ' + toStr(s) + ' s');
+end;
+
+function getXp(): integer;
+begin
+  xpBox:=intToBox(xpIcon[low(xpIcon)].bounds.x1 - 150, xpIcon[low(xpIcon)].bounds.y1, xpIcon[low(xpIcon)].bounds.x2, xpIcon[low(xpIcon)].bounds.y2);
+  result := explode('+', ogl.getChars(xpBox).toString())[0].parseInt();
+end;
+
+procedure progressReport();
+var
+  currentXp: uint32;
+  paintXp, xpHour, logsChoppedHour :integer;
+  time: string;
+begin
+  currentXp := getXP();
+  paintXp := currentXp - startXp;
+  xpHour := round(paintXp * (3600.0 / (getTimeRunning / 1000.0)));
+  logsChoppedHour :=  round(logsChopped * (3600.0 / (getTimeRunning / 1000.0)));
+  time:=getTime(getTimeRunning());
+  smart.__graphics.clear;
+  smart.__graphics.DrawText(toStr(paintXp) + ' ' + SKILL_TO_TRACK + ' xp gained', 'smallChars', point(11, 11), 1);
+  smart.__graphics.DrawText(toStr(paintXp) + ' ' + SKILL_TO_TRACK + ' xp gained', 'smallChars', point(10, 10), clWhite);
+  smart.__graphics.DrawText(toStr(xpHour) + ' ' + SKILL_TO_TRACK + ' xp/hr', 'smallChars', point(11, 29), 1);
+  smart.__graphics.DrawText(toStr(xpHour) + ' ' + SKILL_TO_TRACK + ' xp/hr', 'smallChars', point(10, 28), clWhite);
+  smart.__graphics.DrawText('Logs chopped: ' + toStr(logsChopped), 'smallChars', point(11, 47), 1);
+  smart.__graphics.DrawText('Logs chopped: ' + toStr(logsChopped), 'smallChars', point(10, 46), clWhite);
+  smart.__graphics.DrawText('Logs/hr: ' + toStr(logsChoppedHour), 'smallChars', point(11, 65), 1);
+  smart.__graphics.DrawText('Logs/hr: ' + toStr(logsChoppedHour), 'smallChars', point(10, 64), clWhite);
+  smart.__graphics.DrawText('Status: ' + currentStatus, 'smallChars', point(11, 83), 1);
+  smart.__graphics.DrawText('Status: ' + currentStatus, 'smallChars', point(10, 82), clWhite);
+  smart.__graphics.DrawText('Time Running: ' + time, 'smallChars', point(11, 101), 1);
+  smart.__graphics.DrawText('Time Running: ' + time, 'smallChars', point(10, 100), clWhite);
+  if TAKE_MICRO_BREAKS then
+  begin
+    smart.__graphics.DrawText('Time until next micro break: ' + getTime(microBreakCountdown.timeRemaining()), 'smallChars', point(11, 119), 1);
+    smart.__graphics.DrawText('Time until next micro break: ' + getTime(microBreakCountdown.timeRemaining()), 'smallChars', point(10, 118), clWhite);
+    smart.__graphics.DrawText('Breaks Taken: ' + toStr(breaksTaken), 'smallChars', point(11, 137), 1);
+    smart.__graphics.DrawText('Breaks Taken: ' + toStr(breaksTaken), 'smallChars', point(10, 136), clWhite);
+  end;
+end;
+
+procedure waitFlag;
+begin
+  wait(100);
+  while (not ogl.getTextures(1275).isEmpty()) do
+    wait(randomRange(1500, 1750));
+  wait(randomRange(1000, 1250));
+end;
+
+procedure waitMoving();
+var
+  player: TPoint;
+begin
+  player := minimap.getLocalPosition();
+  wait(randomRange(1250, 1500));
+  while (minimap.getLocalPosition().x <> player.x) or (minimap.getLocalPosition().y <> player.y) do
+  begin
+    player := minimap.getLocalPosition();
+    wait(randomRange(1500, 1750));
+  end;
+end;
+
+procedure clickExit;
+begin
+  if ogl.getTextures(35240).isEmpty() then
+    exit
+  else
+  begin
+    mouse.click(ogl.getTextures([35240], [5050628])[0]);
+    wait(randomRange(250, 750));
+  end;
+end;
+
+function distanceFromTree: extended;
+begin
+  result:=center.distanceFrom(center.closest(ogl.getModels(treeToChop))[0]);
+end;
+
+function isAnimating: boolean;
+begin
+  result := ogl.getModels(playerModelID).isEmpty();
+end;
+
+procedure waitChopping;
+var
+  startingXP: integer;
+  timer : tCountdown;
+begin
+  startingXP := getXP();
+  waitMoving();
+  timer.setTime(CHECK_TIME * randomRange(800, 1200));
+  while isAnimating() do
+  begin
+    wait(randomRange(750, 1250));
+    if getXP() <> startingXP then
+    begin
+      startingXP := getXP();
+      inc(logsChopped);
+      timer.setTime(CHECK_TIME * randomRange(800, 1200));
+    end;
+    progressReport;
+    if timer.isFinished() then
+      exit;
+  end;
+  if getXP() <> startingXP then
+    inc(logsChopped);
+end;
+
+function chopTree: boolean;
+var
+  tree: glModelArray;
+begin
+  currentStatus:='Chopping tree.';
+  progressReport;
+  tree:=ogl.getModels(treeToChop);
+  if (not tree.isEmpty()) then
+  begin
+    if (not tree.getVisible().isEmpty()) then
+    begin
+      mouse.click(center.closest(tree)[0].randomizePointEllipse(35));
+      wait(75);
+      if (mouse.getClick() = 'red') then
+        exit(true);
+    end
+    else if (center.closest(tree)[0].x < (CLIENT_HEIGHT / 2)) then
+      minimap.setDegrees(minimap.getDegrees() + random(20, 30))
+    else
+      minimap.setDegrees(minimap.getDegrees() - random(10, 40));
+  end
+  else
+    wait(randomRange(250, 750));
+end;
+
+procedure destroySpecialLogs;
+var
+  button, specialLogs: glTextureArray;
+begin
+  specialLogs:=inventory.getItems([116280], [4996905]);
+  if specialLogs.isEmpty() then
+    exit
+  else
+  begin
+    if mouse.rightClickOption(specialLogs[randomRange(0, high(specialLogs))].randomizePointEllipse(15), ['Destroy'], (30 * DROP_SPEED)) then
+    begin
+      while ogl.getTextures(169710).isEmpty() do
+        wait(randomRange(750, 1250));
+      button:=ogl.getTextures(169710);
+      mouse.click(button[high(button)]);
+      wait(randomRange(500, 1000));
+    end;
+  end;
+end;
+
+function dropInventory: boolean;
+var
+  i: integer;
+  slot: glTexture;
+begin
+  currentStatus:= 'Dropping inventory.';
+  progressReport;
+  for i:=0 to 27 do
+  begin
+    slot := inventory.getSlot(i)
+    if slot.id <> 0 then
+      mouse.rightClickOption(slot.randomizePointEllipse(30), ['Drop'], (30 * DROP_SPEED));
+    wait(randomRange(100, 250));
+  end;
+end;
+
+procedure dropLogsActionbar;
+begin
+end;
+
+
+procedure craftLogs;
+var
+  i: integer;
+  logs: glTextureArray;
+begin
+  currentStatus:= 'Crafting logs.';
+  progressReport;
+  wait(randomRange(1000, 1250));
+  logs:=inventory.getItems(logType);
+  i:= normalRandom(low(logs), high(logs));
+  mouse.click(logs[i]);
+  while (not ((production.hasProduction() = 'production') or (production.hasProduction() = 'choose a tool'))) do
+    wait(randomRange(750, 1500));
+  if production.setTool(1) then
+    wait(randomRange(750, 1500));
+  if production.setProduct(CRAFT_SELECTION) then
+    wait(randomRange(500, 1000));
+  if production.setMake() then
+    wait(randomRange(1000, 2000));
+  while (production.hasProduction() = 'progress') do
+  begin
+    wait(randomRange(1250, 2000));
+    progressReport;
+  end;
+end;
+
+procedure addToFire;
+var
+  invLogs: glTextureArray;
+  time: tCountDown;
+begin
+  invLogs := inventory.getItems(logType);
+  mouse.click(invLogs[normalRandom(low(invLogs), high(invLogs))]);
+  time.setTime(2000);
+  while (not time.isFinished()) do
+  begin
+    wait(randomRange(500, 1000));
+    if (production.setTool(2)) then
+      break;
+  end;
+end;
+
+function firePresent: boolean;
+var
+  fire: glModelArray;
+begin
+  fire:= ogl.getModels(TCardinalArray([2057907316, 653711928]));
+  if  (not fire.isEmpty()) and (center.closest(fire)[0].distanceFrom(center) < 100) then
+    exit(true);
+end;
+
+function isBurning(): boolean;
+var
+  startInventory: integer;
+  time: tCountDown;
+begin
+  if (not firePresent()) then
+    exit(false);
+  startInventory:=inventory.getItemCount();
+  time.setTime(randomRange(6000, 8000));
+  while (inventory.getItemCount() = startInventory) do
+  begin
+    wait(250);
+    if isAnimating() then
+      time.setTime(randomRange(6000, 8000));
+    if time.isFinished() then
+      exit(false);
+  end;
+  exit(true);
+end;
+
+function lightFire: boolean;
+var
+  invLogs: glTextureArray;
+  time: tCountDown;
+begin
+  invLogs := inventory.getItems(logType);
+  mouse.rightClickOption(invLogs[normalRandom(low(invLogs), high(invLogs))].randomizePointEllipse(20), 'Light', 500);
+  time.setTime(15000);
+  while (not time.isFinished()) do
+  begin
+    wait(250);
+    if firePresent() then
+      exit(true);
+  end;
+end;
+
+procedure burnLogs;
+var
+  logCount: integer;
+begin
+  currentStatus:= 'Burning logs.';
+  progressReport;
+  while ((length(inventory.getItems(logType)) <> 0)) do
+  begin
+    if (not isBurning()) then
+    begin
+      if firePresent() then
+        addToFire
+      else
+      begin
+        if lightFire() then
+        begin
+          wait(randomRange(500, 1000));
+          addToFire;
+        end;
+      end;
+      wait(randomRange(1250, 2500));
+    end
+    else
+      wait(randomRange(1250, 3000));
+  end;
+end;
+
+procedure setMicroBreak;
+begin
+  microBreakCountdown.setTime((TAKE_MICRO_BREAK_EVERY * 60000) + (randomRange(-300000, 300000)));
+end;
+
+procedure takeMicroBreak;
+var
+  breakTime: tCountDown;
+begin
+  if not (TAKE_MICRO_BREAKS and microBreakCountdown.isFinished()) then
+    exit;
+  breakTime.setTime(randomRange(10000, 30000));
+  inc(breaksTaken);
+  while (not breaktime.isFinished()) do
+  begin
+    currentStatus:=('Taking break for ' + toStr(round(breakTime.timeRemaining()/1000)) + ' more seconds.');
+    progressReport;
+    wait(1000);
+  end;
+  setMicroBreak;
+end;
+
+procedure initialSetup;
+begin
+  tree := lowercase(extractFromStr(TREE_TO_CHOP, letters));
+  logType := [116280];
+  case tree of
+    'normal': treeToChop := [1483681832, 2307277189, 1729758151, 1022681373, 3468173246, 506022945, 2269938799, 2664686510];
+    'evergreen': treeToChop := [1310432090, 4036757857];
+    'achey':
+      begin
+        treeToChop := [2405369386, 3557786077, 3636793533, 576829792, 3631720382];
+        logType := [103785];
+      end;
+    'oak': treeToChop := [1081348673, 4035685918, 4094625128];
+    'willow': treeToChop := [613498420, 897174394, 3438012135, 2741093185];
+    'maple': treeToChop := [2801453964, 2730167747];
+    'teak': treeToChop := [1035488252, 2811422158];
+    'arcticpine': treeToChop := [3451487905, 1030592760, 1792171229, 1310432090];
+    'mahogany': treeToChop := [2772708324, 1740954202];
+  end;
+  center:=ogl.getClientMidPoint();
+  actionbar.setState(false);
+  if TAKE_MICRO_BREAKS then
+    setMicroBreak;
+  case lowercase(SKILL_TO_TRACK) of
+    'woodcutting' : xpIcon:= ogl.getTextures(44243);
+    'fletching' : xpIcon:= ogl.getTextures(19315);
+    'firemaking':  xpIcon:= ogl.getTextures(46008);
+    'overall' : xpIcon:= ogl.getTextures(48705);
+  end
+  if xpIcon.isEmpty() then
+  begin
+    writeln('XP Tracker Icon not found, enable it in Settings');
+    terminateScript;
+  end;
+  startXp := getXP();
+  playerModelID:=getPlayerModelID;
+end;
+
+procedure mainLoop;
+begin
+  repeat
+    takeMicroBreak;
+    if actionbar.setState(false) then
+      wait(randomRange(250, 750));
+    clickExit;
+    if (not inventory.isFull()) then
+    begin
+      if chopTree() then
+        waitChopping
+      else
+        wait(randomRange(100, 250));
+      progressReport;
+    end
+    else
+    begin
+      destroySpecialLogs;
+      if (BURN_LOGS and (not inventory.getItems(logType).isEmpty())) then
+        burnLogs
+      else if (CRAFT_LOGS and (not inventory.getItems(logType).isEmpty())) then
+        craftLogs
+      else
+      begin
+        dropInventory;
+      end;
+  end;
+  until(false);
+end;
+
+begin
+  getUpdate();
+  ogl.setup(CLIENT_WIDTH, CLIENT_HEIGHT);
+  ogl.setDebugMode('n');
+  initialSetup;
+  mainLoop;
+end.
